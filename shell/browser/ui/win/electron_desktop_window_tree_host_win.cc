@@ -4,7 +4,11 @@
 
 #include "shell/browser/ui/win/electron_desktop_window_tree_host_win.h"
 
+#include "base/win/windows_version.h"
 #include "ui/base/win/hwnd_metrics.h"
+#include "ui/base/win/shell.h"
+#include "ui/display/win/dpi.h"
+#include "ui/display/win/screen_win.h"
 
 namespace electron {
 
@@ -36,18 +40,53 @@ bool ElectronDesktopWindowTreeHostWin::HasNativeFrame() const {
   // Since we never use chromium's titlebar implementation, we can just say
   // that we use a native titlebar. This will disable the repaint locking when
   // DWM composition is disabled.
-  return true;
+  return !ui::win::IsAeroGlassEnabled();
+}
+
+bool ElectronDesktopWindowTreeHostWin::GetDwmFrameInsetsInPixels(
+    gfx::Insets* insets) const {
+  if (IsMaximized() && !native_window_view_->has_frame()) {
+    int caption_height =
+        display::win::ScreenWin::GetSystemMetricsInDIP(SM_CYSIZEFRAME) +
+        display::win::ScreenWin::GetSystemMetricsInDIP(SM_CYCAPTION);
+
+    int frame_size =
+        base::win::GetVersion() < base::win::Version::WIN10
+            ? display::win::ScreenWin::GetSystemMetricsInDIP(SM_CXSIZEFRAME)
+            : 0;
+
+    *insets = gfx::Insets(caption_height, frame_size, frame_size, frame_size);
+    // The DWM API's expect values in pixels. We need to convert from DIP to
+    // pixels here.
+    *insets = insets->Scale(display::win::GetDPIScale());
+    return true;
+  }
+  return false;
 }
 
 bool ElectronDesktopWindowTreeHostWin::GetClientAreaInsets(
     gfx::Insets* insets,
     HMONITOR monitor) const {
   if (IsMaximized() && !native_window_view_->has_frame()) {
-    // Windows automatically adds a standard width border to all sides when a
-    // window is maximized.
-    int frame_thickness = ui::GetFrameThickness(monitor) - 1;
-    *insets = gfx::Insets(frame_thickness, frame_thickness, frame_thickness,
-                          frame_thickness);
+    if (base::win::GetVersion() < base::win::Version::WIN10) {
+      // This tells Windows that most of the window is a client area, meaning
+      // Chrome will draw it. Windows still fills in the glass bits because of
+      // the DwmExtendFrameIntoClientArea call in |UpdateDWMFrame|. Without this
+      // 1 pixel offset on the right and bottom:
+      //   * windows paint in a more standard way, and
+      //   * we get weird black bars at the top when maximized in multiple
+      //   monitor
+      //     configurations.
+      int border_thickness = 1;
+      *insets = gfx::Insets(0, 0, border_thickness, border_thickness);
+    } else {
+      // Reduce the Windows non-client border size because we extend the border
+      // into our client area in UpdateDWMFrame(). The top inset must be 0 or
+      // else windows will draw a full native titlebar outside the client area.
+      int frame_thickness = ui::GetFrameThickness(monitor);
+      *insets =
+          gfx::Insets(0, frame_thickness, frame_thickness, frame_thickness);
+    }
     return true;
   }
   return false;
